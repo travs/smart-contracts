@@ -13,7 +13,7 @@ const NUM_RUNS = 20;
 
 // accounts
 let admin;
-let daoSetter;
+let daoOperator;
 let stakers;
 
 // token
@@ -28,7 +28,7 @@ let firstBlockTimestamp;
 contract('KyberStaking simulator', async (accounts) => {
     before('one time init: Stakers, KyberStaking, KNC token', async() => {
         admin = accounts[1];
-        daoSetter = accounts[2];
+        daoOperator = accounts[2];
         stakers = accounts.slice(5,); // 5 stakers
         kncToken = await TestToken.new("kyber Crystals", "KNC", tokenDecimals);
 
@@ -38,8 +38,8 @@ contract('KyberStaking simulator', async (accounts) => {
         kyberStaking = await MockKyberStaking.new(
             kncToken.address,
             epochPeriod,
-            firstBlockTimestamp + 10,
-            daoSetter
+            firstBlockTimestamp + 1000,
+            daoOperator
           );
     });
 

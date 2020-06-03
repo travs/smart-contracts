@@ -14,6 +14,45 @@ let delegateRuns = 0;
 let withdrawRuns = 0;
 let noActionRuns = 0;
 
+// use this for Dao simulator
+module.exports.genPerformStakingAction = async function(
+    kyberStaking, NUM_RUNS, currentLoopNum, kncToken, stakers, epochPeriod
+) {
+    let operation = StakeGenerator.genNextOp(currentLoopNum, NUM_RUNS);
+    switch(operation) {
+        case DEPOSIT:
+            result = await StakeGenerator.genDeposit(kncToken, stakers);
+            result.dAddress = await kyberStaking.getLatestRepresentative(result.staker);
+            console.log(result.msg);
+            console.log(`Deposit: staker ${result.staker}, amount: ${result.amount}`);
+            executeDeposit(kyberStaking, result, epochPeriod);
+            break;
+        case DELEGATE:
+            result = await StakeGenerator.genDelegate(stakers);
+            console.log(result.msg);
+            console.log(`Delegate: staker ${result.staker}, address: ${result.dAddress}`);
+            executeDelegate(kyberStaking, result, epochPeriod);
+            break;
+        case WITHDRAW:
+            result = await StakeGenerator.genWithdraw(kyberStaking, stakers);
+            result.dAddress = await kyberStaking.getLatestRepresentative(result.staker);
+            console.log(result.msg);
+            console.log(`Withdrawal: staker ${result.staker}, amount: ${result.amount}`);
+            executeWithdraw(kyberStaking, result, epochPeriod);
+        case NO_ACTION:
+            console.log("do nothing for this epoch...");
+            // Advance time by a bit
+            let currentBlockTime = await Helper.getCurrentBlockTime();
+            await Helper.mineNewBlockAt(
+                currentBlockTime + Helper.getRandomInt(10, epochPeriod.toNumber() / 8)
+            );
+            break;
+        default:
+            console.log("unexpected operation: " + operation);
+            break;
+    }
+}
+
 module.exports.doFuzzStakeTests = async function(
     kyberStaking, NUM_RUNS, kncToken, stakers, epochPeriod
 ) {
@@ -24,7 +63,7 @@ module.exports.doFuzzStakeTests = async function(
         switch(operation) {
             case DEPOSIT:
                 result = await StakeGenerator.genDeposit(kncToken, stakers);
-                result.dAddress = await kyberStaking.getLatestDelegatedAddress(result.staker);
+                result.dAddress = await kyberStaking.getLatestRepresentative(result.staker);
                 console.log(result.msg);
                 console.log(`Deposit: staker ${result.staker}, amount: ${result.amount}`);
                 validity = await executeAndVerifyDepositInvariants(kyberStaking, result, epochPeriod);
@@ -35,29 +74,16 @@ module.exports.doFuzzStakeTests = async function(
                 result = await StakeGenerator.genDelegate(stakers);
                 console.log(result.msg);
                 console.log(`Delegate: staker ${result.staker}, address: ${result.dAddress}`);
-                validity= await executeAndVerifyDelegateInvariants(kyberStaking, result, epochPeriod);
+                validity = await executeAndVerifyDelegateInvariants(kyberStaking, result, epochPeriod);
                 delegateRuns = logResult(validity, delegateRuns);
                 break;
 
             case WITHDRAW:
                 result = await StakeGenerator.genWithdraw(kyberStaking, stakers);
-                result.dAddress = await kyberStaking.getLatestDelegatedAddress(result.staker);
+                result.dAddress = await kyberStaking.getLatestRepresentative(result.staker);
                 console.log(result.msg);
                 console.log(`Withdrawal: staker ${result.staker}, amount: ${result.amount}`);
-                if (result.isValid) {
-                    try {
-                        await kyberStaking.withdraw(result.amount, {from: result.staker});
-                    } catch(e) {
-                        console.log('Valid withdrawal, but failed');
-                        console.log(e);
-                        numWithdrawFail++;
-                        break;
-                    }
-                } else {
-                    await expectRevert.unspecified(
-                        kyberStaking.withdraw(result.amount, {from: result.staker})
-                    );
-                }
+                executeWithdraw(kyberStaking, result, epochPeriod);
                 // validity = await verifyWithdrawInvariants(kyberStaking, stakers, result);
                 validity = {isValid: true};
                 withdrawRuns = logResult(validity, withdrawRuns);
@@ -67,7 +93,7 @@ module.exports.doFuzzStakeTests = async function(
                 // Advance time by a bit
                 let currentBlockTime = await Helper.getCurrentBlockTime();
                 await Helper.mineNewBlockAt(
-                    currentBlockTime + Helper.getRandomInt(10, epochPeriod.toString())
+                    currentBlockTime + Helper.getRandomInt(10, epochPeriod.toNumber() / 8)
                 );
                 // validity = await verifyNoActionInvariants(kyberStaking, stakers, result);
                 validity = {isValid: true};
@@ -89,23 +115,9 @@ module.exports.doFuzzStakeTests = async function(
 async function executeAndVerifyDepositInvariants(kyberStaking, result, epochPeriod) {
     let isValid = true;
     let initState = await getState(kyberStaking, result, null);
-    let currentBlockTime = await Helper.getCurrentBlockTime();
-    await Helper.setNextBlockTimestamp(currentBlockTime + Helper.getRandomInt(5, epochPeriod.toNumber() / 3));
-
+    
     // do deposit
-    if (result.isValid) {
-        try {
-            await kyberStaking.deposit(result.amount, {from: result.staker});
-        } catch(e) {
-            console.log('Valid deposit, but failed');
-            console.log(e);
-            return false;
-        }
-    } else {
-        await expectRevert.unspecified(
-            await kyberStaking.deposit(result.amount, {from: result.staker})
-        );
-    }
+    executeDeposit(kyberStaking, result, epochPeriod);
 
     let newState = await getState(kyberStaking, result, initState.oldDelegateAddress);
     isValid &= (await verifyDepositChanges(initState, newState, result));
@@ -115,11 +127,42 @@ async function executeAndVerifyDepositInvariants(kyberStaking, result, epochPeri
     }
 }
 
+async function executeDeposit(kyberStaking, result, epochPeriod) {
+    let currentBlockTime = await Helper.getCurrentBlockTime();
+    await Helper.setNextBlockTimestamp(currentBlockTime + Helper.getRandomInt(5, epochPeriod.toNumber() / 8));
+    if (result.isValid) {
+        try {
+            await kyberStaking.deposit(result.amount, {from: result.staker});
+        } catch(e) {
+            console.log('Valid deposit, but failed');
+            console.log(e);
+            return;
+        }
+    } else {
+        await expectRevert.unspecified(
+            await kyberStaking.deposit(result.amount, {from: result.staker})
+        );
+    }
+}
+
 async function executeAndVerifyDelegateInvariants(kyberStaking, result, epochPeriod) {
     let isValid = true;
     let initState = await getState(kyberStaking, result, null);
+    
+    // execute delegate
+    executeDelegate(kyberStaking, result, epochPeriod);
+
+    let newState = await getState(kyberStaking, result, initState.oldDelegateAddress);
+    isValid &= (await verifyDelegateChanges(initState, newState, result));
+    return {
+        isValid: isValid,
+        states: {'initState': initState, 'newState': newState}
+    }
+}
+
+async function executeDelegate(kyberStaking, result, epochPeriod) {
     let currentBlockTime = await Helper.getCurrentBlockTime();
-    await Helper.setNextBlockTimestamp(currentBlockTime + Helper.getRandomInt(5, epochPeriod.toNumber() / 3));
+    await Helper.setNextBlockTimestamp(currentBlockTime + Helper.getRandomInt(5, epochPeriod.toNumber() / 8));
 
     // do delegate
     if (result.dAddress == zeroAddress) {
@@ -130,12 +173,24 @@ async function executeAndVerifyDelegateInvariants(kyberStaking, result, epochPer
     } else {
         await kyberStaking.delegate(result.dAddress, {from: result.staker});
     }
+}
 
-    let newState = await getState(kyberStaking, result, initState.oldDelegateAddress);
-    isValid &= (await verifyDelegateChanges(initState, newState, result));
-    return {
-        isValid: isValid,
-        states: {'initState': initState, 'newState': newState}
+async function executeWithdraw(kyberStaking, result, epochPeriod) {
+    let currentBlockTime = await Helper.getCurrentBlockTime();
+    await Helper.setNextBlockTimestamp(currentBlockTime + Helper.getRandomInt(5, epochPeriod.toNumber() / 8));
+    if (result.isValid) {
+        try {
+            await kyberStaking.withdraw(result.amount, {from: result.staker});
+        } catch(e) {
+            console.log('Valid withdrawal, but failed');
+            console.log(e);
+            // numWithdrawFail++;
+            // break;
+        }
+    } else {
+        await expectRevert.unspecified(
+            kyberStaking.withdraw(result.amount, {from: result.staker})
+        );
     }
 }
 
@@ -151,7 +206,7 @@ async function getState(kyberStaking, result, oldDelegateAddress) {
     
     res.staker.dataCurEpoch = await getStakerDataForEpoch(kyberStaking, result.staker, currEpochNum);
     res.oldDelegateAddress = (oldDelegateAddress == undefined) ?
-        (await kyberStaking.getLatestDelegatedAddress(result.staker)) :
+        (await kyberStaking.getLatestRepresentative(result.staker)) :
         oldDelegateAddress;
     res.newDelegateAddress = result.dAddress;
 
@@ -178,13 +233,11 @@ async function getState(kyberStaking, result, oldDelegateAddress) {
 }
 
 async function getStakerDataForEpoch(kyberStaking, staker, epochNum) {
-    let res = await kyberStaking.getStakerDataForPastEpoch(staker, epochNum);
-    res.stake = res._stake;
-    res.dStake = res._delegatedStake;
-    res.dAddress = res._delegatedAddress;
-    delete res._stake;
-    delete res._delegatedStake;
-    delete res._delegatedAddress;
+    let res = await kyberStaking.getStakerRawData(staker, epochNum);
+    res.dStake = res.delegatedStake;
+    res.dAddress = res.representative;
+    delete res.delegatedStake;
+    delete res.representative;
     return res;
 }
 
@@ -196,7 +249,7 @@ async function getLatestStakeData(kyberStaking, address) {
     }
     res.stake = await kyberStaking.getLatestStakeBalance(address);
     res.dStake = await kyberStaking.getLatestDelegatedStake(address);
-    res.dAddress = await kyberStaking.getLatestDelegatedAddress(address);
+    res.dAddress = await kyberStaking.getLatestRepresentative(address);
     return res;
 }
 
